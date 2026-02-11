@@ -3,6 +3,7 @@ import { SupabaseClient } from "@supabase/supabase-js";
 import { getClient } from "./client";
 import { SongSchema, validateArraySafe } from "@/lib/validation";
 import { Database } from "@/types_db";
+import { SONG_QUERY, mapToDomainSong } from "../services/song.service";
 
 export interface ArtistInfo {
   artist: string;
@@ -11,66 +12,13 @@ export interface ArtistInfo {
   latest_update: string;
 }
 
-// Relational query string for all songs
-export const SONG_RELATIONAL_SELECT = `
-  *,
-  album:album_id(*),
-  song_artists(
-    artists(*)
-  )
-`;
-
-export interface RawSongJunction {
-  artists: Artist | null;
-}
-
-export interface RawSongData {
-  id: number;
-  user_id: string | null;
-  title: string | null;
-  song_path: string | null;
-  image_path: string | null;
-  lyrics_path?: string | null;
-  created_at: string | null;
-  album_id: number | null;
-  duration: number | null;
-  album?: Album | null;
-  song_artists?: RawSongJunction[];
-}
-
-export const mapRelationalSong = (data: RawSongData): Song | null => {
-  if (!data) return null;
-  
-  // Extract artists from junction table
-  const artists: Artist[] = data.song_artists
-    ?.map((sa: RawSongJunction) => sa.artists)
-    .filter((a): a is Artist => !!a) || [];
-
-  // Extract album
-  const album: Album | null = data.album || null;
-
-  return {
-    id: data.id,
-    user_id: data.user_id,
-    title: data.title,
-    song_path: data.song_path,
-    image_path: data.image_path,
-    lyrics_path: data.lyrics_path || null,
-    created_at: data.created_at,
-    album_id: data.album_id,
-    duration: data.duration,
-    artists,
-    album
-  };
-};
-
 export async function fetchSongsByQuery(query: string, limit: number = 50, supabaseClient?: SupabaseClient<Database>): Promise<Song[]> {
   const supabase = getClient(supabaseClient);
 
   if (!query) {
     const { data, error } = await supabase
       .from('songs')
-      .select(SONG_RELATIONAL_SELECT)
+      .select(SONG_QUERY)
       .order('created_at', { ascending: false })
       .limit(limit);
 
@@ -79,14 +27,14 @@ export async function fetchSongsByQuery(query: string, limit: number = 50, supab
       return [];
     }
 
-    const mapped = (data || []).map(mapRelationalSong).filter(Boolean) as Song[];
+    const mapped = (data || []).map(mapToDomainSong).filter(Boolean) as Song[];
     return validateArraySafe(SongSchema, mapped);
   }
 
   // 1. Search songs by title
   const songTitleQuery = supabase
     .from('songs')
-    .select(SONG_RELATIONAL_SELECT)
+    .select(SONG_QUERY)
     .ilike('title', `%${query}%`)
     .limit(limit);
 
@@ -95,7 +43,7 @@ export async function fetchSongsByQuery(query: string, limit: number = 50, supab
     .from('song_artists')
     .select(`
       song:songs (
-        ${SONG_RELATIONAL_SELECT}
+        ${SONG_QUERY}
       ),
       artists!inner(name)
     `)
@@ -132,22 +80,22 @@ export async function fetchSongsByQuery(query: string, limit: number = 50, supab
   if (albumsResult.error) console.error('Error searching songs by album:', albumsResult.error);
 
   // Collect and map all results
-  const allSongsRaw: RawSongData[] = [
-    ...(songsResult.data || []).map(s => s as unknown as RawSongData),
-    ...(artistsResult.data || []).map((item: any) => item.song as unknown as RawSongData),
-    ...(albumsResult.data || []).map(s => s as unknown as RawSongData)
-  ].filter(Boolean);
+  const allSongs: Song[] = [
+    ...(songsResult.data || []).map(mapToDomainSong),
+    ...(artistsResult.data || []).map((item: any) => mapToDomainSong(item.song)),
+    ...(albumsResult.data || []).map(mapToDomainSong)
+  ].filter((s): s is Song => !!s);
 
   // Deduplicate by ID
   const uniqueSongsMap = new Map<number, Song>();
-  allSongsRaw.forEach(raw => {
-    const mapped = mapRelationalSong(raw);
-    if (mapped && !uniqueSongsMap.has(mapped.id)) {
-      uniqueSongsMap.set(mapped.id, mapped);
+  allSongs.forEach(song => {
+    if (!uniqueSongsMap.has(song.id)) {
+      uniqueSongsMap.set(song.id, song);
     }
   });
 
   const finalSongs = Array.from(uniqueSongsMap.values()).slice(0, limit);
+  // Re-validate strictly
   return validateArraySafe(SongSchema, finalSongs);
 }
 
@@ -156,7 +104,7 @@ export async function fetchAllSongs(supabaseClient?: SupabaseClient<Database>, o
 
   const { data, error } = await supabase
     .from('songs')
-    .select(SONG_RELATIONAL_SELECT)
+    .select(SONG_QUERY)
     .order('created_at', { ascending: false })
     .range(offset, offset + limit - 1);
 
@@ -165,7 +113,7 @@ export async function fetchAllSongs(supabaseClient?: SupabaseClient<Database>, o
     return [];
   }
 
-  const mapped = (data || []).map(mapRelationalSong).filter(Boolean) as Song[];
+  const mapped = (data || []).map(mapToDomainSong).filter(Boolean) as Song[];
   return validateArraySafe(SongSchema, mapped);
 }
 
@@ -182,7 +130,7 @@ export async function fetchSongsByArtist(artistIdentifier: string | number, supa
       .from('song_artists')
       .select(`
         song:songs (
-          ${SONG_RELATIONAL_SELECT}
+          ${SONG_QUERY}
         )
       `)
       .eq('artist_id', artistIdentifier);
@@ -192,7 +140,7 @@ export async function fetchSongsByArtist(artistIdentifier: string | number, supa
       .from('song_artists')
       .select(`
         song:songs (
-          ${SONG_RELATIONAL_SELECT}
+          ${SONG_QUERY}
         ),
         artists!inner(name)
       `)
@@ -206,8 +154,7 @@ export async function fetchSongsByArtist(artistIdentifier: string | number, supa
     return [];
   }
 
-  const songsRaw = (data || []).map((item) => item.song as unknown as RawSongData).filter(Boolean);
-  const mapped = songsRaw.map(mapRelationalSong).filter((s): s is Song => !!s);
+  const mapped = (data || []).map((item: any) => mapToDomainSong(item.song)).filter((s): s is Song => !!s);
   return validateArraySafe(SongSchema, mapped);
 }
 
@@ -227,7 +174,7 @@ export async function fetchLikedSongs(supabaseClient?: SupabaseClient<Database>,
     .select(`
       *,
       songs (
-        ${SONG_RELATIONAL_SELECT}
+        ${SONG_QUERY}
       )
     `)
     .eq('user_id', user.id)
@@ -239,8 +186,7 @@ export async function fetchLikedSongs(supabaseClient?: SupabaseClient<Database>,
     return [];
   }
 
-  const songsRaw = (data || []).map((item) => item.songs as unknown as RawSongData).filter(Boolean);
-  const mapped = songsRaw.map(mapRelationalSong).filter((s): s is Song => !!s);
+  const mapped = (data || []).map((item: any) => mapToDomainSong(item.songs)).filter((s): s is Song => !!s);
   return validateArraySafe(SongSchema, mapped);
 }
 
@@ -259,7 +205,7 @@ export async function fetchUserSongs(supabaseClient?: SupabaseClient<Database>, 
 
   const { data, error } = await supabase
     .from('songs')
-    .select(SONG_RELATIONAL_SELECT)
+    .select(SONG_QUERY)
     .eq('user_id', userData.user.id)
     .order('created_at', { ascending: false })
     .range(offset, offset + limit - 1);
@@ -268,7 +214,7 @@ export async function fetchUserSongs(supabaseClient?: SupabaseClient<Database>, 
     console.error('Error fetching user songs:', error.message);
   }
 
-  const mapped = (data || []).map(mapRelationalSong).filter(Boolean) as Song[];
+  const mapped = (data || []).map(mapToDomainSong).filter(Boolean) as Song[];
   return validateArraySafe(SongSchema, mapped);
 }
 

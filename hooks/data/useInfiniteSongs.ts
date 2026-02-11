@@ -2,7 +2,7 @@ import { useInfiniteQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect } from "react";
 import { useSupabaseClient } from "@/providers/SupabaseProvider";
 import { Song } from "@/types";
-import { SONG_RELATIONAL_SELECT, mapRelationalSong, RawSongData } from "@/lib/api/songs";
+import { SONG_QUERY, mapToDomainSong } from "@/lib/services/song.service";
 import { queryKeys } from "@/lib/queryKeys";
 
 export function useInfiniteSongs(
@@ -23,13 +23,13 @@ export function useInfiniteSongs(
                 .select(`
                     *,
                     songs (
-                        ${SONG_RELATIONAL_SELECT}
+                        ${SONG_QUERY}
                     )
                 `);
         } else {
             query = supabaseClient
                 .from('songs')
-                .select(SONG_RELATIONAL_SELECT);
+                .select(SONG_QUERY);
         }
 
         if ((table === 'liked_songs' || table === 'user_songs') && userId) {
@@ -44,15 +44,12 @@ export function useInfiniteSongs(
 
         if (table === 'liked_songs') {
             if (!data) return [];
-            const songsRaw = (data as unknown as Array<{ songs: RawSongData }>)
-                .map(item => item.songs)
-                .filter(Boolean);
-            
-            return songsRaw.map(mapRelationalSong).filter((s): s is Song => !!s);
+            // Map the joined songs
+            return (data as any[]).map(item => mapToDomainSong(item.songs)).filter((s): s is Song => !!s);
         }
         
-        const songsRaw = (data as unknown as RawSongData[]) || [];
-        return songsRaw.map(mapRelationalSong).filter((s): s is Song => !!s);
+        // Map normal songs
+        return (data || []).map(mapToDomainSong).filter((s): s is Song => !!s);
     };
 
     const queryKey = table === 'liked_songs' 
